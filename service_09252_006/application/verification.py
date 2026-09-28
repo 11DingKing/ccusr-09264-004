@@ -20,6 +20,7 @@ from ..domain.fingerprint import (
 class VerificationReport:
     ok: bool = True
     blob_count: int = 0
+    redaction_count: int = 0
     package_count: int = 0
     sealed_count: int = 0
     decided_count: int = 0
@@ -42,6 +43,7 @@ class VerificationReport:
         return {
             "ok": self.ok,
             "blob_count": self.blob_count,
+            "redaction_count": self.redaction_count,
             "package_count": self.package_count,
             "sealed_count": self.sealed_count,
             "decided_count": self.decided_count,
@@ -58,10 +60,94 @@ def verify_database(path: str) -> VerificationReport:
     conn.row_factory = sqlite3.Row
     try:
         _verify_blobs(conn, report)
+        _verify_redactions(conn, report)
         _verify_packages(conn, report)
     finally:
         conn.close()
     return report
+
+
+def _verify_redactions(conn: sqlite3.Connection, report: VerificationReport) -> None:
+    """脱敏版本：裁剪文字节可重算；当前/封存固定指针必须指向有效快照。"""
+    try:
+        rows = conn.execute("SELECT * FROM redactions").fetchall()
+    except sqlite3.OperationalError:
+        return  # 旧库尚未迁移
+    report.redaction_count = len(rows)
+    for row in rows:
+        blob = conn.execute(
+            "SELECT data, size FROM blobs WHERE sha256 = ?", (row["sha256"],)
+        ).fetchone()
+        if blob is None:
+            report.fail(
+                "redaction_blob_missing",
+                redaction_id=row["redaction_id"],
+                sha256=row["sha256"],
+            )
+            continue
+        if digest_bytes(bytes(blob["data"])) != row["sha256"]:
+            report.fail(
+                "redaction_blob_tampered",
+                redaction_id=row["redaction_id"],
+                sha256=row["sha256"],
+            )
+        if len(blob["data"]) != row["size"]:
+            report.fail(
+                "redaction_size_mismatch",
+                redaction_id=row["redaction_id"],
+                stored_size=row["size"],
+                actual_size=len(blob["data"]),
+            )
+
+    # 版本的当前脱敏指针必须指向该版本自己的脱敏快照
+    for v in conn.execute(
+        "SELECT version_id, current_redaction_id FROM versions"
+        " WHERE current_redaction_id IS NOT NULL"
+    ):
+        r = conn.execute(
+            "SELECT source_version_id FROM redactions WHERE redaction_id = ?",
+            (v["current_redaction_id"],),
+        ).fetchone()
+        if r is None:
+            report.fail(
+                "current_redaction_missing",
+                version_id=v["version_id"],
+                redaction_id=v["current_redaction_id"],
+            )
+        elif r["source_version_id"] != v["version_id"]:
+            report.fail(
+                "current_redaction_wrong_version",
+                version_id=v["version_id"],
+                redaction_id=v["current_redaction_id"],
+            )
+
+    # 封存条目固定的脱敏快照必须存在且属于该条目引用的版本
+    try:
+        pinned_rows = conn.execute(
+            "SELECT package_id, version_id, pinned_redaction_id FROM entries"
+            " WHERE pinned_redaction_id IS NOT NULL"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return
+    for e in pinned_rows:
+        r = conn.execute(
+            "SELECT source_version_id FROM redactions WHERE redaction_id = ?",
+            (e["pinned_redaction_id"],),
+        ).fetchone()
+        if r is None:
+            report.fail(
+                "pinned_redaction_missing",
+                package_id=e["package_id"],
+                version_id=e["version_id"],
+                redaction_id=e["pinned_redaction_id"],
+            )
+        elif r["source_version_id"] != e["version_id"]:
+            report.fail(
+                "pinned_redaction_wrong_version",
+                package_id=e["package_id"],
+                version_id=e["version_id"],
+                redaction_id=e["pinned_redaction_id"],
+            )
 
 
 def _verify_blobs(conn: sqlite3.Connection, report: VerificationReport) -> None:

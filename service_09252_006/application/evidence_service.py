@@ -291,6 +291,7 @@ class EvidenceService(Service):
             "media_type": v.media_type,
             "supersedes_version_id": v.supersedes_version_id,
             "withdrawn": v.withdrawn,
+            "current_redaction_id": v.current_redaction_id,
             "created_by": v.created_by,
             "created_at": v.created_at,
             "replayed": replayed,

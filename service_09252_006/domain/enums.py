@@ -24,6 +24,12 @@ class Sensitivity(str, Enum):
     SENSITIVE = "sensitive"  # 敏感企业反馈等，按机构与角色最小披露
 
 
+class RedactionScope(str, Enum):
+    """脱敏版本的授权披露范围（留存于 SQLite，查询时由 Python 按身份判定）。"""
+
+    INSTITUTION = "institution"  # 裁剪文对本机构全体成员（含普通提交人）可见
+
+
 class PackageStatus(str, Enum):
     DRAFT = "draft"                # 组包中，可追加材料
     SEALED = "sealed"              # 已封存，清单指纹固定

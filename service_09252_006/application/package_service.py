@@ -9,7 +9,13 @@
 """
 from __future__ import annotations
 
-from ..domain.disclosure import DisclosureContext, redact_entry
+from ..domain.disclosure import (
+    HIDDEN,
+    ORIGINAL,
+    REDACTED,
+    DisclosureContext,
+    render_entry,
+)
 from ..domain.enums import PackageStatus, Role
 from ..domain.errors import (
     ConflictError,
@@ -19,7 +25,7 @@ from ..domain.errors import (
     ValidationError,
 )
 from ..domain.fingerprint import manifest_fingerprint
-from ..domain.models import PackageEntry, ReviewPackage, User
+from ..domain.models import PackageEntry, RedactionVersion, ReviewPackage, User
 from .base import Service, require_roles
 
 
@@ -228,6 +234,17 @@ class PackageService(Service):
                     return self._package_dict(fresh, replayed=True)
                 raise ConflictError("评审包状态已被其他操作改变，请重试")
 
+            # 封存把每个敏感条目“当前脱敏版本”固定进清单；此后再脱敏/切换
+            # 都不改变历史包里普通成员看到的裁剪文。
+            for entry in package.entries:
+                version = self.repo.get_version(entry.version_id)
+                if version is not None and version.current_redaction_id is not None:
+                    self.repo.pin_entry_redaction(
+                        package_id,
+                        entry.version_id,
+                        version.current_redaction_id,
+                    )
+
             sealed = self.repo.get_package(package_id)
             self.audit(
                 actor.user_id, "package.sealed",
@@ -273,25 +290,54 @@ class PackageService(Service):
 
         visible_entries = []
         hidden_count = 0
+        redacted_count = 0
         for entry in package.entries:
-            can_see = ctx.can_see_entry(entry, package)
-            if not can_see:
+            redaction = self._effective_redaction(package, entry)
+            tier = ctx.select_content_tier(entry, package, redaction)
+            if tier == HIDDEN:
                 hidden_count += 1
-            visible_entries.append(redact_entry(entry, can_see))
+            elif tier == REDACTED:
+                redacted_count += 1
+            visible_entries.append(render_entry(entry, tier, redaction))
 
         view = self._package_dict(package)
         view["entries"] = visible_entries
         view["redacted_entries"] = hidden_count
+        view["redacted_tier_entries"] = redacted_count
         view["viewer"] = actor.user_id
         return view
+
+    def _effective_redaction(
+        self, package: ReviewPackage, entry: PackageEntry
+    ) -> RedactionVersion | None:
+        """条目对普通成员生效的脱敏版本。
+
+        - 草稿包：跟随版本当前指针（此时清单本身仍可变）；
+        - 已封存及之后：只认封存时固定的 pinned_redaction_id。封存时
+          尚无脱敏版本即为 None 且永不回落——封存固定了“当时看到了
+          哪一版裁剪文（或完全遮蔽）”，此后再脱敏/再切换都不改变
+          历史包里旧反馈的显示。
+        """
+        if package.status == PackageStatus.DRAFT.value:
+            version = self.repo.get_version(entry.version_id)
+            if version is not None and version.current_redaction_id is not None:
+                return self.repo.get_redaction(version.current_redaction_id)
+            return None
+        if entry.pinned_redaction_id is not None:
+            return self.repo.get_redaction(entry.pinned_redaction_id)
+        return None
 
     def download_entry(
         self, actor: User, *, package_id: str, version_id: str
     ) -> tuple[dict, bytes, str]:
-        """通过评审包条目下载内容字节，强制走最小披露授权。
+        """通过评审包条目下载内容，按身份三级选择：
 
-        返回 (版本描述, 字节, media_type)。评审人只可下载其仍有效分配
-        所在包的敏感反馈；请求一旦取消，授权即时消失。
+        - original：授权人取原文字节；
+        - redacted：授权范围内的普通成员取当前/封存固定的裁剪文；
+        - hidden：无权，403。
+
+        评审人只可下载其仍有效分配所在包的敏感反馈原文；请求一旦取消，
+        授权即时消失（且外机构评审人不在裁剪文授权范围内）。
         """
         package = self.repo.get_package(package_id)
         if package is None:
@@ -306,8 +352,25 @@ class PackageService(Service):
             for r in self.repo.list_active_requests_by_reviewer(actor.user_id)
         }
         ctx = DisclosureContext(actor, active)
-        if not ctx.can_see_entry(entry, package):
+        redaction = self._effective_redaction(package, entry)
+        tier = ctx.select_content_tier(entry, package, redaction)
+        if tier == HIDDEN:
             raise PermissionDeniedError("无权下载该材料（最小披露限制）")
+        if tier == REDACTED:
+            assert redaction is not None
+            blob = self.repo.get_blob(redaction.sha256)
+            if blob is None:
+                raise NotFoundError("脱敏内容缺失，无法提供")
+            return {
+                "version_id": version_id,
+                "material_id": entry.material_id,
+                "sha256": "sha256:" + redaction.sha256,
+                "media_type": redaction.media_type,
+                "size": redaction.size,
+                "content_tier": REDACTED,
+                "redaction_id": redaction.redaction_id,
+                "redaction_no": redaction.redaction_no,
+            }, blob.data, redaction.media_type
         version = self.repo.get_version(version_id)
         blob = self.repo.get_blob(entry.sha256)
         if version is None or blob is None:
@@ -318,6 +381,7 @@ class PackageService(Service):
             "sha256": "sha256:" + version.sha256,
             "media_type": version.media_type,
             "size": version.size,
+            "content_tier": ORIGINAL,
         }, blob.data, version.media_type
 
     def list_packages(self, actor: User) -> list[dict]:

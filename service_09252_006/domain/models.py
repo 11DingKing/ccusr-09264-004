@@ -61,6 +61,31 @@ class MaterialVersion:
     created_by: str
     created_at: str
     withdrawn: bool                # 该版本是否已撤回
+    current_redaction_id: Optional[str] = None  # 面向无原文权限者的当前脱敏版本
+
+
+@dataclass
+class RedactionVersion:
+    """某一敏感材料【具体原文版本】的一次不可变脱敏快照。
+
+    每次脱敏都追加新版本（redaction_no 递增），裁剪文同样按 sha256
+    内容寻址存入 blobs。版本切换只移动 current_redaction_id 指针，
+    旧脱敏快照永不修改、永不删除——“切换版本不改变旧反馈的显示”。
+    """
+
+    redaction_id: str
+    material_id: str
+    source_version_id: str         # 被裁剪的原文版本
+    institution_id: str
+    redaction_no: int
+    sha256: str                    # 裁剪文字节摘要
+    size: int
+    media_type: str
+    scope: str                     # RedactionScope：裁剪文的授权披露范围
+    note: str
+    created_by: str
+    created_at: str
+    activated_at: Optional[str] = None  # 非空表示该快照曾被/正被切换启用
 
 
 @dataclass
@@ -75,6 +100,9 @@ class PackageEntry:
     kind: str
     sensitivity: str
     added_at: str
+    # 封存时固定的脱敏版本：封存后再创建/切换脱敏版本都不改变历史包里
+    # 普通成员看到的裁剪文；草稿包为 None，跟随版本当前指针。
+    pinned_redaction_id: Optional[str] = None
 
 
 @dataclass

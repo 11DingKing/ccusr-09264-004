@@ -38,6 +38,111 @@ class VerificationTests(unittest.TestCase):
         self.assertEqual(report.blob_count, 2)
         self.assertEqual(report.decided_count, 1)
 
+    def test_clean_database_with_redactions_passes(self) -> None:
+        from service_09252_006.domain.enums import MaterialKind, Sensitivity
+        from tests.flow import upload_material
+
+        feedback = upload_material(
+            self.h, self.admin,
+            kind=MaterialKind.ENTERPRISE_FEEDBACK.value,
+            data="敏感原文".encode("utf-8"),
+            title="企业反馈",
+            sensitivity=Sensitivity.SENSITIVE.value,
+        )
+        self.h.ctx.redactions.create_redaction(
+            self.admin,
+            version_id=feedback.version["version_id"],
+            data="裁剪文".encode("utf-8"),
+            activate=True,
+        )
+        sealed = seal_new_package(self.h, self.admin, items=[feedback])
+        self.h.ctx.close()
+        report = verify_database(self.h.db_path)
+        self.assertTrue(report.ok, report.failures)
+        self.assertEqual(report.redaction_count, 1)
+        # 封存时已固定脱敏版本
+        import sqlite3
+
+        conn = sqlite3.connect(self.h.db_path)
+        pinned = conn.execute(
+            "SELECT pinned_redaction_id FROM entries WHERE package_id = ?",
+            (sealed.package_id,),
+        ).fetchone()[0]
+        conn.close()
+        self.assertIsNotNone(pinned)
+
+    def test_tampered_redaction_blob_detected(self) -> None:
+        from service_09252_006.domain.enums import MaterialKind, Sensitivity
+        from tests.flow import upload_material
+
+        feedback = upload_material(
+            self.h, self.admin,
+            kind=MaterialKind.ENTERPRISE_FEEDBACK.value,
+            data="敏感原文二".encode("utf-8"),
+            title="企业反馈",
+            sensitivity=Sensitivity.SENSITIVE.value,
+        )
+        rdc = self.h.ctx.redactions.create_redaction(
+            self.admin,
+            version_id=feedback.version["version_id"],
+            data="裁剪文二".encode("utf-8"),
+            activate=True,
+        )
+        self.h.ctx.close()
+
+        import sqlite3
+
+        sha = rdc["sha256"].split(":", 1)[1]
+        conn = sqlite3.connect(self.h.db_path)
+        conn.execute(
+            "UPDATE blobs SET data = ? WHERE sha256 = ?",
+            ("事后改写裁剪文".encode("utf-8"), sha),
+        )
+        conn.commit()
+        conn.close()
+
+        report = verify_database(self.h.db_path)
+        self.assertFalse(report.ok)
+        self.assertIn(
+            "redaction_blob_tampered",
+            {f["kind"] for f in report.failures},
+        )
+
+    def test_dangling_current_redaction_detected(self) -> None:
+        from service_09252_006.domain.enums import MaterialKind, Sensitivity
+        from tests.flow import upload_material
+
+        feedback = upload_material(
+            self.h, self.admin,
+            kind=MaterialKind.ENTERPRISE_FEEDBACK.value,
+            data="敏感原文三".encode("utf-8"),
+            title="企业反馈",
+            sensitivity=Sensitivity.SENSITIVE.value,
+        )
+        self.h.ctx.redactions.create_redaction(
+            self.admin,
+            version_id=feedback.version["version_id"],
+            data="裁剪文三".encode("utf-8"),
+            activate=True,
+        )
+        self.h.ctx.close()
+
+        import sqlite3
+
+        conn = sqlite3.connect(self.h.db_path)
+        conn.execute(
+            "UPDATE versions SET current_redaction_id = 'rdc_nonexistent'"
+        )
+        conn.commit()
+        conn.close()
+
+        report = verify_database(self.h.db_path)
+        self.assertFalse(report.ok)
+        self.assertIn(
+            "current_redaction_missing",
+            {f["kind"] for f in report.failures},
+        )
+
     def test_tampered_blob_detected(self) -> None:
         sealed = seal_new_package(self.h, self.admin)
         target_sha = sealed.items[0].version["sha256"].split(":", 1)[1]

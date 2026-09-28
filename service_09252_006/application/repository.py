@@ -16,6 +16,7 @@ from ..domain.models import (
     MaterialVersion,
     Objection,
     PackageEntry,
+    RedactionVersion,
     ReviewPackage,
     ReviewRequest,
     User,
@@ -87,6 +88,36 @@ class Repository(abc.ABC):
     def mark_material_withdrawn(
         self, material_id: str, withdrawn: bool
     ) -> bool: ...
+
+    # ---- 敏感反馈脱敏版本 ----
+    @abc.abstractmethod
+    def insert_redaction(self, redaction: RedactionVersion) -> None: ...
+
+    @abc.abstractmethod
+    def get_redaction(self, redaction_id: str) -> RedactionVersion | None: ...
+
+    @abc.abstractmethod
+    def list_redactions(self, version_id: str) -> list[RedactionVersion]: ...
+
+    @abc.abstractmethod
+    def find_redaction_by_digest(
+        self, version_id: str, sha256: str
+    ) -> RedactionVersion | None: ...
+
+    @abc.abstractmethod
+    def set_current_redaction(
+        self, version_id: str, redaction_id: str | None
+    ) -> bool:
+        """切换版本的当前脱敏指针；版本不存在时返回 False。"""
+
+    @abc.abstractmethod
+    def mark_redaction_activated(self, redaction_id: str, at: str) -> bool: ...
+
+    @abc.abstractmethod
+    def pin_entry_redaction(
+        self, package_id: str, version_id: str, redaction_id: str | None
+    ) -> bool:
+        """封存时把当前脱敏版本固定进包条目。"""
 
     # ---- 评审包 ----
     @abc.abstractmethod

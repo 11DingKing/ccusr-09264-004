@@ -251,6 +251,61 @@ class ApiHandler(BaseHTTPRequestHandler):
         )
         self._send_json(200, result)
 
+    # ----------------------------------------------------- 敏感反馈脱敏版本
+    def create_redaction(self, version_id: str) -> None:
+        actor = self._actor()
+        body = self._read_json()
+        data = base64.b64decode(body["content_base64"], validate=True)
+        result = self.services.redactions.create_redaction(
+            actor,
+            version_id=version_id,
+            data=data,
+            media_type=body.get("media_type", "text/plain"),
+            scope=body.get("scope", "institution"),
+            note=body.get("note", ""),
+            activate=bool(body.get("activate", False)),
+            idempotency_key=self._idempotency_key(),
+        )
+        self._send_json(201, result)
+
+    def list_redactions(self, version_id: str) -> None:
+        actor = self._actor()
+        self._send_json(
+            200,
+            {"redactions": self.services.redactions.list_redactions(actor, version_id)},
+        )
+
+    def activate_redaction(self, redaction_id: str) -> None:
+        actor = self._actor()
+        self._send_json(
+            200,
+            self.services.redactions.activate_redaction(
+                actor,
+                redaction_id=redaction_id,
+                idempotency_key=self._idempotency_key(),
+            ),
+        )
+
+    def get_redaction(self, redaction_id: str) -> None:
+        actor = self._actor()
+        self._send_json(
+            200, self.services.redactions.get_redaction(actor, redaction_id)
+        )
+
+    def download_redaction(self, redaction_id: str) -> None:
+        actor = self._actor()
+        meta, data = self.services.redactions.download_redaction(actor, redaction_id)
+        self._send_bytes(
+            200,
+            data,
+            meta["media_type"],
+            extra_headers={
+                "X-Redaction-Id": meta["redaction_id"],
+                "X-Content-Sha256": meta["sha256"],
+                "X-Content-Tier": "redacted",
+            },
+        )
+
     # --------------------------------------------------------- 评审包
     def create_package(self) -> None:
         actor = self._actor()
@@ -296,15 +351,14 @@ class ApiHandler(BaseHTTPRequestHandler):
         meta, data, media_type = self.services.packages.download_entry(
             actor, package_id=package_id, version_id=version_id
         )
-        self._send_bytes(
-            200,
-            data,
-            media_type,
-            extra_headers={
-                "X-Version-Id": meta["version_id"],
-                "X-Content-Sha256": meta["sha256"],
-            },
-        )
+        headers = {
+            "X-Version-Id": meta["version_id"],
+            "X-Content-Sha256": meta["sha256"],
+            "X-Content-Tier": meta.get("content_tier", "original"),
+        }
+        if "redaction_id" in meta:
+            headers["X-Redaction-Id"] = meta["redaction_id"]
+        self._send_bytes(200, data, media_type, extra_headers=headers)
 
     # ----------------------------------------------------------- 评审
     def assign(self, package_id: str) -> None:
@@ -404,6 +458,11 @@ def _routes() -> dict[str, list[tuple[str, str]]]:
         ("/v1/materials/{material_id}/versions", "upload_version"),
         ("/v1/materials/{material_id}/withdraw", "withdraw_material"),
         ("/v1/versions/{version_id}/withdraw", "withdraw_version"),
+        (
+            "/v1/versions/{version_id}/redactions",
+            "create_redaction",
+        ),
+        ("/v1/redactions/{redaction_id}/activate", "activate_redaction"),
         ("/v1/packages", "create_package"),
         ("/v1/packages/{package_id}/entries", "add_entry"),
         ("/v1/packages/{package_id}/seal", "seal_package"),
@@ -417,6 +476,9 @@ def _routes() -> dict[str, list[tuple[str, str]]]:
     get = [
         ("/v1/materials/{material_id}", "get_material"),
         ("/v1/versions/{version_id}", "get_version"),
+        ("/v1/versions/{version_id}/redactions", "list_redactions"),
+        ("/v1/redactions/{redaction_id}", "get_redaction"),
+        ("/v1/redactions/{redaction_id}/content", "download_redaction"),
         ("/v1/packages", "list_packages"),
         ("/v1/packages/{package_id}", "get_package"),
         ("/v1/packages/{package_id}/requests", "list_requests"),

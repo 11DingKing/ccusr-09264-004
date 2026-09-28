@@ -37,6 +37,21 @@
   失权；角色调整在下次请求鉴权时即时生效。
 - 无权限者看到的清单条目不返回摘要（避免内容指纹本身泄露）。
 
+### 敏感反馈脱敏版本
+- 敏感企业反馈可制作**脱敏版本**：每次脱敏都追加一条不可变快照
+  （`redactions`，裁剪文同样按 SHA-256 内容寻址去重），只增不改。
+- 内容按身份三级选择（Python 查询层完成，SQLite 只留存授权范围 `scope`）：
+  授权人（本机构管理员、权威机构、审计、有效分配的评审人）永远取**原文**；
+  授权范围内的本机构普通成员取**裁剪文**；其余人完全遮蔽，下载返回 403。
+  外机构评审人即使曾被分配，取消后也不回落看到裁剪文。
+- 新建脱敏版本不自动生效；显式切换只移动 `versions.current_redaction_id`
+  指针。草稿包跟随当前指针；**封存时把当时的脱敏版本固定进条目**
+  （`entries.pinned_redaction_id`），封存后再脱敏/再切换都不改变历史包
+  里旧反馈的显示——切换后旧反馈仍按固定裁剪文可读，封存时无脱敏版本的
+  包以后也不回落显示裁剪文。
+- 脱敏版本的增改不进入封存清单指纹，manifest/review 指纹不受影响。
+- 制作/切换脱敏版本仅限本机构管理员；相同裁剪字节重复上传回放既有版本。
+
 ### 并发、幂等与恢复
 - 所有写用例在 `BEGIN IMMEDIATE` 事务内执行；状态推进使用条件 UPDATE
   （`WHERE status = expected`），并发分配/签发下只有一方推进，另一方回放，
@@ -93,6 +108,11 @@ python3 -m service_09252_006.cli verify --db ./data/qe.db [--json]
 | POST | `/v1/materials` | 登记材料（kind/sensitivity） |
 | POST | `/v1/materials/{id}/versions` | 上传版本（base64，内容寻址） |
 | POST | `/v1/versions/{id}/withdraw` | 撤回版本 |
+| POST | `/v1/versions/{id}/redactions` | 制作脱敏版本（敏感反馈，可 activate） |
+| GET  | `/v1/versions/{id}/redactions` | 脱敏版本列表 |
+| POST | `/v1/redactions/{id}/activate` | 切换当前脱敏版本 |
+| GET  | `/v1/redactions/{id}` | 脱敏版本元数据 |
+| GET  | `/v1/redactions/{id}/content` | 授权范围内下载裁剪文 |
 | POST | `/v1/materials/{id}/withdraw` | 撤回整份材料 |
 | POST | `/v1/packages` | 建评审包（可带 `supersedes_package_id`） |
 | POST | `/v1/packages/{id}/entries` | 草稿包追加版本 |
@@ -119,8 +139,10 @@ python3 -m compileall -q service_09252_006 tests
 
 覆盖：内容寻址与版本链、封存不变量、**材料撤回**（封存前后）、后补材料
 只能复审、**最小披露与权限变化**（取消/拒绝/角色调整/跨机构）、
+**敏感反馈脱敏版本**（每次脱敏成版、按身份三级选择、切换后旧反馈显示
+不变、v1→v2 条件迁移）、
 **跨时区截止**（上海/伦敦/洛杉矶）、异议与签发约束、幂等重放与失败重试、
-多连接**并发复审**、离线核验对字节/清单/评审篡改的检出，以及完整 HTTP
-端到端流程。
+多连接**并发复审**、离线核验对字节/清单/评审/脱敏快照篡改的检出，以及
+完整 HTTP 端到端流程。
 
 扩展模块覆盖证据、审批、权限、留存、对账与恢复等业务边界。
