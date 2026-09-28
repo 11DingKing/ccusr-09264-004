@@ -44,6 +44,7 @@ class Material:
     current_version_id: Optional[str]
     withdrawn: bool
     created_at: str
+    current_redaction_id: Optional[str] = None  # 当前生效的脱敏版本（敏感反馈）
 
 
 @dataclass
@@ -61,6 +62,31 @@ class MaterialVersion:
     created_by: str
     created_at: str
     withdrawn: bool                # 该版本是否已撤回
+
+
+@dataclass
+class RedactionVersion:
+    """敏感反馈的一次【脱敏版本】。
+
+    每次脱敏都生成一条不可变记录（版本链 redaction_no / supersedes_redaction_id）：
+    - source_sha256 指向原文字节（versions/blobs 中的真实内容，永不改动）；
+    - redacted_sha256 指向裁剪文，裁剪文同样按内容寻址存入 blobs；
+    - 授权人看原文、普通成员看裁剪文；切换当前脱敏版本只改变“此后展示选哪份
+      裁剪文”，旧反馈的原文与各历史脱敏版本都不变。
+    """
+
+    redaction_id: str
+    material_id: str
+    institution_id: str
+    source_version_id: str
+    source_sha256: str
+    redacted_sha256: str
+    size: int
+    media_type: str
+    redaction_no: int
+    supersedes_redaction_id: Optional[str]
+    created_by: str
+    created_at: str
 
 
 @dataclass

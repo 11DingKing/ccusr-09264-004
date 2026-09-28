@@ -22,12 +22,13 @@ from ..domain.models import (
     MaterialVersion,
     Objection,
     PackageEntry,
+    RedactionVersion,
     ReviewPackage,
     ReviewRequest,
     User,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class SqliteRepository(Repository):
@@ -51,9 +52,11 @@ class SqliteRepository(Repository):
         version = self._conn.execute("PRAGMA user_version").fetchone()[0]
         if version >= SCHEMA_VERSION:
             return
-        # executescript 会自行提交事务；把 user_version 写入放在同一脚本
-        self._conn.executescript(
-            """
+        if version == 0:
+            # 全新库：一次性建出全部表
+            # executescript 会自行提交事务；把 user_version 写入放在同一脚本
+            self._conn.executescript(
+                """
                 CREATE TABLE IF NOT EXISTS users (
                     user_id        TEXT PRIMARY KEY,
                     institution_id TEXT,
@@ -77,7 +80,8 @@ class SqliteRepository(Repository):
                     title              TEXT NOT NULL,
                     current_version_id TEXT,
                     withdrawn          INTEGER NOT NULL DEFAULT 0,
-                    created_at         TEXT NOT NULL
+                    created_at         TEXT NOT NULL,
+                    current_redaction_id TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS versions (
@@ -95,6 +99,24 @@ class SqliteRepository(Repository):
                     withdrawn_at            TEXT,
                     UNIQUE(material_id, version_no)
                 );
+
+                CREATE TABLE IF NOT EXISTS redactions (
+                    redaction_id            TEXT PRIMARY KEY,
+                    material_id             TEXT NOT NULL REFERENCES materials(material_id),
+                    institution_id          TEXT NOT NULL,
+                    source_version_id       TEXT NOT NULL REFERENCES versions(version_id),
+                    source_sha256           TEXT NOT NULL,
+                    redacted_sha256         TEXT NOT NULL,
+                    size                    INTEGER NOT NULL,
+                    media_type              TEXT NOT NULL,
+                    redaction_no            INTEGER NOT NULL,
+                    supersedes_redaction_id TEXT,
+                    created_by              TEXT NOT NULL,
+                    created_at              TEXT NOT NULL,
+                    UNIQUE(material_id, redaction_no)
+                );
+                CREATE INDEX IF NOT EXISTS idx_redactions_material
+                    ON redactions(material_id, redaction_no);
 
                 CREATE TABLE IF NOT EXISTS packages (
                     package_id            TEXT PRIMARY KEY,
@@ -176,9 +198,39 @@ class SqliteRepository(Repository):
                     created_at  TEXT NOT NULL
                 );
 
-                PRAGMA user_version = 1;
+                PRAGMA user_version = 2;
             """
-        )
+            )
+            return
+
+        # 旧库条件迁移：v1 -> v2，新增敏感反馈脱敏版本表与“当前版本”指针。
+        # 只追加、不改动既有表数据；脱敏版本历史独立留存，不影响历史包指纹。
+        if version == 1:
+            self._conn.executescript(
+                """
+                ALTER TABLE materials ADD COLUMN current_redaction_id TEXT;
+
+                CREATE TABLE IF NOT EXISTS redactions (
+                    redaction_id            TEXT PRIMARY KEY,
+                    material_id             TEXT NOT NULL REFERENCES materials(material_id),
+                    institution_id          TEXT NOT NULL,
+                    source_version_id       TEXT NOT NULL REFERENCES versions(version_id),
+                    source_sha256           TEXT NOT NULL,
+                    redacted_sha256         TEXT NOT NULL,
+                    size                    INTEGER NOT NULL,
+                    media_type              TEXT NOT NULL,
+                    redaction_no            INTEGER NOT NULL,
+                    supersedes_redaction_id TEXT,
+                    created_by              TEXT NOT NULL,
+                    created_at              TEXT NOT NULL,
+                    UNIQUE(material_id, redaction_no)
+                );
+                CREATE INDEX IF NOT EXISTS idx_redactions_material
+                    ON redactions(material_id, redaction_no);
+
+                PRAGMA user_version = 2;
+                """
+            )
 
     @contextlib.contextmanager
     def _txn_direct(self) -> Iterator[None]:
@@ -384,6 +436,62 @@ class SqliteRepository(Repository):
         cur = self._conn.execute(
             "UPDATE materials SET withdrawn = ? WHERE material_id = ?",
             (int(withdrawn), material_id),
+        )
+        return cur.rowcount == 1
+
+    # ---------------------------------------------------------- redactions
+    def insert_redaction(self, redaction: RedactionVersion) -> None:
+        self._conn.execute(
+            "INSERT INTO redactions(redaction_id, material_id, institution_id,"
+            " source_version_id, source_sha256, redacted_sha256, size,"
+            " media_type, redaction_no, supersedes_redaction_id, created_by,"
+            " created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                redaction.redaction_id,
+                redaction.material_id,
+                redaction.institution_id,
+                redaction.source_version_id,
+                redaction.source_sha256,
+                redaction.redacted_sha256,
+                redaction.size,
+                redaction.media_type,
+                redaction.redaction_no,
+                redaction.supersedes_redaction_id,
+                redaction.created_by,
+                redaction.created_at,
+            ),
+        )
+
+    def get_redaction(self, redaction_id: str) -> RedactionVersion | None:
+        row = self._conn.execute(
+            "SELECT * FROM redactions WHERE redaction_id = ?", (redaction_id,)
+        ).fetchone()
+        return None if row is None else _row_to_redaction(row)
+
+    def list_redactions(self, material_id: str) -> list[RedactionVersion]:
+        rows = self._conn.execute(
+            "SELECT * FROM redactions WHERE material_id = ? ORDER BY redaction_no",
+            (material_id,),
+        ).fetchall()
+        return [_row_to_redaction(r) for r in rows]
+
+    def get_current_redaction(self, material_id: str) -> RedactionVersion | None:
+        row = self._conn.execute(
+            """
+            SELECT r.* FROM redactions r
+            JOIN materials m ON m.current_redaction_id = r.redaction_id
+            WHERE m.material_id = ?
+            """,
+            (material_id,),
+        ).fetchone()
+        return None if row is None else _row_to_redaction(row)
+
+    def set_current_redaction(
+        self, material_id: str, redaction_id: str | None
+    ) -> bool:
+        cur = self._conn.execute(
+            "UPDATE materials SET current_redaction_id = ? WHERE material_id = ?",
+            (redaction_id, material_id),
         )
         return cur.rowcount == 1
 
@@ -687,6 +795,7 @@ def _row_to_material(row: sqlite3.Row) -> Material:
         current_version_id=row["current_version_id"],
         withdrawn=bool(row["withdrawn"]),
         created_at=row["created_at"],
+        current_redaction_id=row["current_redaction_id"],
     )
 
 
@@ -716,4 +825,21 @@ def _row_to_entry(row: sqlite3.Row) -> PackageEntry:
         kind=row["kind"],
         sensitivity=row["sensitivity"],
         added_at=row["added_at"],
+    )
+
+
+def _row_to_redaction(row: sqlite3.Row) -> RedactionVersion:
+    return RedactionVersion(
+        redaction_id=row["redaction_id"],
+        material_id=row["material_id"],
+        institution_id=row["institution_id"],
+        source_version_id=row["source_version_id"],
+        source_sha256=row["source_sha256"],
+        redacted_sha256=row["redacted_sha256"],
+        size=row["size"],
+        media_type=row["media_type"],
+        redaction_no=row["redaction_no"],
+        supersedes_redaction_id=row["supersedes_redaction_id"],
+        created_by=row["created_by"],
+        created_at=row["created_at"],
     )

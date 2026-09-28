@@ -197,6 +197,94 @@ class HttpApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(body["ok"])
 
+    def test_sensitive_feedback_redaction_versions_over_http(self) -> None:
+        admin = self._create_user(
+            "admin-a", ["institution_admin"], "inst-a", "tok-admin"
+        )
+        submitter = self._create_user(
+            "sub-a", ["institution_submitter"], "inst-a", "tok-sub"
+        )
+
+        plain = "敏感：联系人张三 13800000000".encode("utf-8")
+        crop1 = "敏感：联系人***".encode("utf-8")
+        crop2 = "敏感：内容已隐藏".encode("utf-8")
+
+        status, mat = admin.request(
+            "POST", "/v1/materials",
+            {"kind": "enterprise_feedback", "title": "企业反馈",
+             "sensitivity": "sensitive"},
+        )
+        self.assertEqual(status, 201)
+        mid = mat["material_id"]
+        status, ver = admin.request(
+            "POST", f"/v1/materials/{mid}/versions",
+            {"content_base64": base64.b64encode(plain).decode("ascii")},
+        )
+        self.assertEqual(status, 201)
+        vid = ver["version_id"]
+        status, pkg = admin.request("POST", "/v1/packages", {"title": "2026秋"})
+        pid = pkg["package_id"]
+        admin.request("POST", f"/v1/packages/{pid}/entries", {"version_id": vid})
+        admin.request("POST", f"/v1/packages/{pid}/seal", {})
+
+        # 脱敏版本生成前：普通成员下载被拒
+        status, _ = submitter.request(
+            "GET", f"/v1/packages/{pid}/entries/{vid}/content",
+        )
+        self.assertEqual(status, 403)
+
+        # 生成第 1 版脱敏
+        status, r1 = admin.request(
+            "POST", f"/v1/materials/{mid}/redactions",
+            {"redacted_content_base64": base64.b64encode(crop1).decode("ascii")},
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(r1["redaction_no"], 1)
+        self.assertTrue(r1["active"])
+
+        # 普通成员拿到裁剪文 crop1；管理员拿到原文
+        status, data, _ = submitter.request(
+            "GET", f"/v1/packages/{pid}/entries/{vid}/content", raw=True,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(data, crop1)
+        status, data, _ = admin.request(
+            "GET", f"/v1/packages/{pid}/entries/{vid}/content", raw=True,
+        )
+        self.assertEqual(data, plain)
+
+        # 对同一原版本生成第 2 版裁剪，自动成为当前
+        status, r2 = admin.request(
+            "POST", f"/v1/materials/{mid}/redactions",
+            {"redacted_content_base64": base64.b64encode(crop2).decode("ascii"),
+             "source_version_id": vid},
+        )
+        self.assertEqual(r2["redaction_no"], 2)
+        status, data, _ = submitter.request(
+            "GET", f"/v1/packages/{pid}/entries/{vid}/content", raw=True,
+        )
+        self.assertEqual(data, crop2)
+
+        # 列表显示两版历史与当前指针
+        status, listing = admin.request(
+            "GET", f"/v1/materials/{mid}/redactions"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(len(listing["redactions"]), 2)
+        self.assertEqual(listing["current_redaction_id"], r2["redaction_id"])
+
+        # 切回第 1 版：普通成员再次看到 crop1，r2 仍留存
+        status, _ = admin.request(
+            "POST",
+            f"/v1/materials/{mid}/redactions/{r1['redaction_id']}/activate",
+            {},
+        )
+        self.assertEqual(status, 200)
+        status, data, _ = submitter.request(
+            "GET", f"/v1/packages/{pid}/entries/{vid}/content", raw=True,
+        )
+        self.assertEqual(data, crop1)
+
 
 if __name__ == "__main__":
     unittest.main()

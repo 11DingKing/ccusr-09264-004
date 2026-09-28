@@ -58,10 +58,83 @@ def verify_database(path: str) -> VerificationReport:
     conn.row_factory = sqlite3.Row
     try:
         _verify_blobs(conn, report)
+        _verify_redactions(conn, report)
         _verify_packages(conn, report)
     finally:
         conn.close()
     return report
+
+
+def _verify_redactions(conn: sqlite3.Connection, report: VerificationReport) -> None:
+    """核验敏感反馈脱敏版本：裁剪文字节可重算、原文摘要存在、版本号连续。
+
+    脱敏版本是追加留存的独立记录，不参与封存清单指纹；这里只核验其自身
+    内容寻址完整性与版本链，不影响历史包结论。
+    """
+    try:
+        rows = conn.execute(
+            "SELECT * FROM redactions ORDER BY material_id, redaction_no"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        # 旧库尚未迁移出 redactions 表：无脱敏版本可核验
+        return
+
+    blob_rows = {r["sha256"]: r for r in conn.execute("SELECT sha256, data FROM blobs")}
+    seen_by_material: dict[str, int] = {}
+    for row in rows:
+        mid = row["material_id"]
+        no = row["redaction_no"]
+        seen_by_material[mid] = seen_by_material.get(mid, 0) + 1
+        if no != seen_by_material[mid]:
+            report.fail(
+                "redaction_no_gap",
+                material_id=mid,
+                redaction_id=row["redaction_id"],
+                redaction_no=no,
+                expected=seen_by_material[mid],
+            )
+        if row["redacted_sha256"] == row["source_sha256"]:
+            report.fail(
+                "redaction_equals_source",
+                material_id=mid,
+                redaction_id=row["redaction_id"],
+            )
+        for label, sha in (
+            ("source", row["source_sha256"]),
+            ("redacted", row["redacted_sha256"]),
+        ):
+            blob = blob_rows.get(sha)
+            if blob is None:
+                report.fail(
+                    "redaction_blob_missing",
+                    material_id=mid,
+                    redaction_id=row["redaction_id"],
+                    which=label,
+                    sha256=sha,
+                )
+            elif digest_bytes(blob["data"]) != sha:
+                report.fail(
+                    "redaction_blob_tampered",
+                    material_id=mid,
+                    redaction_id=row["redaction_id"],
+                    which=label,
+                    sha256=sha,
+                )
+
+    # 当前指针（若存在）必须指向本材料的真实脱敏版本
+    current_rows = conn.execute(
+        "SELECT material_id, current_redaction_id FROM materials"
+        " WHERE current_redaction_id IS NOT NULL"
+    ).fetchall()
+    valid = {r["redaction_id"]: r["material_id"] for r in rows}
+    for row in current_rows:
+        owner = valid.get(row["current_redaction_id"])
+        if owner is None or owner != row["material_id"]:
+            report.fail(
+                "current_redaction_dangling",
+                material_id=row["material_id"],
+                current_redaction_id=row["current_redaction_id"],
+            )
 
 
 def _verify_blobs(conn: sqlite3.Connection, report: VerificationReport) -> None:

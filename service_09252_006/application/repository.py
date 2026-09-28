@@ -16,6 +16,7 @@ from ..domain.models import (
     MaterialVersion,
     Objection,
     PackageEntry,
+    RedactionVersion,
     ReviewPackage,
     ReviewRequest,
     User,
@@ -87,6 +88,26 @@ class Repository(abc.ABC):
     def mark_material_withdrawn(
         self, material_id: str, withdrawn: bool
     ) -> bool: ...
+
+    # ---- 敏感反馈脱敏版本 ----
+    @abc.abstractmethod
+    def insert_redaction(self, redaction: RedactionVersion) -> None: ...
+
+    @abc.abstractmethod
+    def get_redaction(self, redaction_id: str) -> RedactionVersion | None: ...
+
+    @abc.abstractmethod
+    def list_redactions(self, material_id: str) -> list[RedactionVersion]: ...
+
+    @abc.abstractmethod
+    def get_current_redaction(self, material_id: str) -> RedactionVersion | None:
+        """材料当前生效的脱敏版本（materials.current_redaction_id 指向）。"""
+
+    @abc.abstractmethod
+    def set_current_redaction(
+        self, material_id: str, redaction_id: str | None
+    ) -> bool:
+        """切换当前脱敏版本；材料不存在返回 False。仅改指针，历史记录不变。"""
 
     # ---- 评审包 ----
     @abc.abstractmethod

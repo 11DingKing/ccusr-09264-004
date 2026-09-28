@@ -251,6 +251,40 @@ class ApiHandler(BaseHTTPRequestHandler):
         )
         self._send_json(200, result)
 
+    # ------------------------------------------------- 敏感反馈脱敏版本
+    def create_redaction(self, material_id: str) -> None:
+        actor = self._actor()
+        body = self._read_json()
+        redacted = base64.b64decode(body["redacted_content_base64"], validate=True)
+        result = self.services.redactions.create_redaction(
+            actor,
+            material_id=material_id,
+            redacted_content=redacted,
+            media_type=body.get("media_type"),
+            source_version_id=body.get("source_version_id"),
+            note=body.get("note", ""),
+            idempotency_key=self._idempotency_key(),
+        )
+        self._send_json(201, result)
+
+    def list_redactions(self, material_id: str) -> None:
+        actor = self._actor()
+        self._send_json(
+            200, self.services.redactions.list_redactions(actor, material_id)
+        )
+
+    def activate_redaction(self, material_id: str, redaction_id: str) -> None:
+        actor = self._actor()
+        self._send_json(
+            200,
+            self.services.redactions.activate_redaction(
+                actor,
+                material_id=material_id,
+                redaction_id=redaction_id,
+                idempotency_key=self._idempotency_key(),
+            ),
+        )
+
     # --------------------------------------------------------- 评审包
     def create_package(self) -> None:
         actor = self._actor()
@@ -403,6 +437,11 @@ def _routes() -> dict[str, list[tuple[str, str]]]:
         ("/v1/materials", "create_material"),
         ("/v1/materials/{material_id}/versions", "upload_version"),
         ("/v1/materials/{material_id}/withdraw", "withdraw_material"),
+        ("/v1/materials/{material_id}/redactions", "create_redaction"),
+        (
+            "/v1/materials/{material_id}/redactions/{redaction_id}/activate",
+            "activate_redaction",
+        ),
         ("/v1/versions/{version_id}/withdraw", "withdraw_version"),
         ("/v1/packages", "create_package"),
         ("/v1/packages/{package_id}/entries", "add_entry"),
@@ -416,6 +455,7 @@ def _routes() -> dict[str, list[tuple[str, str]]]:
     ]
     get = [
         ("/v1/materials/{material_id}", "get_material"),
+        ("/v1/materials/{material_id}/redactions", "list_redactions"),
         ("/v1/versions/{version_id}", "get_version"),
         ("/v1/packages", "list_packages"),
         ("/v1/packages/{package_id}", "get_package"),

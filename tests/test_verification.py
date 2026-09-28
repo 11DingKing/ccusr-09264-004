@@ -38,6 +38,37 @@ class VerificationTests(unittest.TestCase):
         self.assertEqual(report.blob_count, 2)
         self.assertEqual(report.decided_count, 1)
 
+    def test_redaction_versions_pass_and_tamper_detected(self) -> None:
+        sealed = seal_new_package(self.h, self.admin)  # items[1] 为敏感反馈
+        feedback = sealed.items[1]
+        mid = feedback.material["material_id"]
+        cropped = "敏感反馈：企业***要求匿名".encode("utf-8")
+        r = self.h.ctx.redactions.create_redaction(
+            self.admin, material_id=mid, redacted_content=cropped
+        )
+        self.h.ctx.close()
+
+        # 含脱敏版本的干净库通过
+        report = verify_database(self.h.db_path)
+        self.assertTrue(report.ok, report.failures)
+
+        # 篡改裁剪文字节 -> 被脱敏版本核验检出
+        import sqlite3
+
+        conn = sqlite3.connect(self.h.db_path)
+        conn.execute(
+            "UPDATE blobs SET data = ? WHERE sha256 = ?",
+            ("事后改写的裁剪文".encode("utf-8"),
+             r["redacted_sha256"].split(":", 1)[1]),
+        )
+        conn.commit()
+        conn.close()
+        report = verify_database(self.h.db_path)
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(f["kind"] == "redaction_blob_tampered" for f in report.failures)
+        )
+
     def test_tampered_blob_detected(self) -> None:
         sealed = seal_new_package(self.h, self.admin)
         target_sha = sealed.items[0].version["sha256"].split(":", 1)[1]
